@@ -1,47 +1,55 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
 	"time"
 )
 
-func handleTCP(conn net.Conn)  {
-    b := make([]byte, 1024)
-    defer conn.Close()
+func handleTCP(id uint64, conn net.Conn) {
+	b := make([]byte, 1024)
+	defer conn.Close()
 
-    for {
-        conn.SetReadDeadline(time.Now().Add(time.Second))
-        n, err := conn.Read(b)
+	// send client its id
+	binary.NativeEndian.PutUint64(b, id)
+	conn.Write(b)
 
-        if err != nil {
-            if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-                continue
-            } else {
-                break
-            }
-        }
+	for {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Read(b)
 
-        fmt.Printf("received %s\n", string(b[:n]))
-    }
+		// terminate connection on non-timeout error (eg. EOF)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			} else {
+				break
+			}
+		}
+
+		received := string(b[:n-1]) // omit newline at the end
+		fmt.Printf("Client %d: %s\n", id, received)
+	}
 }
 
 func main() {
 
-    listener, err := net.Listen("tcp", "localhost:9001")
-    defer listener.Close()
+	listener, err := net.Listen("tcp", "localhost:9001")
+	defer listener.Close()
 
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-    for {
-        conn, err := listener.Accept()
-        if err != nil {
-            log.Fatalln(err)
-        }
+	var id uint64
+	for id = 0; ; id++ {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Fatalln(err)
+		}
 
-        go handleTCP(conn)
-    }
+		go handleTCP(id, conn)
+	}
 }
