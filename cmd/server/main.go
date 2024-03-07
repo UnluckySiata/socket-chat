@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-var channels = make([]chan []byte, 64)
+var connections = make([]net.Conn, 0, 64)
 
-func handleTCP(id uint64, conn net.Conn, ch chan []byte) {
+func handleTCP(id uint64, conn net.Conn) {
 	b := make([]byte, 1024)
 	defer conn.Close()
 
@@ -34,24 +34,13 @@ func handleTCP(id uint64, conn net.Conn, ch chan []byte) {
         fullMsg := fmt.Sprintf("Client %d: %s", id, string(b[:n]))
         fmt.Print(fullMsg)
 
-        for _, c := range channels {
-            if c == ch {
-                continue
+        for _, c := range connections {
+            if c != conn && c != nil {
+                c.Write([]byte(fullMsg))
             }
-            copy(b, []byte(fullMsg))
-
-            select {
-            case c <- b:
-            default:
-            }
-        }
-
-        select {
-        case received := <-ch:
-            conn.Write(received)
-        default:
         }
 	}
+    connections[id] = nil
 }
 
 func main() {
@@ -63,15 +52,14 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	var id uint64
+    var id uint64
 	for id = 0; ; id++ {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Fatalln(err)
 		}
-        ch := make(chan []byte, 32)
-        channels[id] = ch
+        connections = append(connections, conn)
 
-		go handleTCP(id, conn, ch)
+		go handleTCP(id, conn)
 	}
 }
