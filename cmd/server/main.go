@@ -8,7 +8,9 @@ import (
 	"time"
 )
 
-func handleTCP(id uint64, conn net.Conn) {
+var channels = make([]chan []byte, 64)
+
+func handleTCP(id uint64, conn net.Conn, ch chan []byte) {
 	b := make([]byte, 1024)
 	defer conn.Close()
 
@@ -17,7 +19,7 @@ func handleTCP(id uint64, conn net.Conn) {
 	conn.Write(b)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, err := conn.Read(b)
 
 		// terminate connection on non-timeout error (eg. EOF)
@@ -29,8 +31,26 @@ func handleTCP(id uint64, conn net.Conn) {
 			}
 		}
 
-		received := string(b[:n-1]) // omit newline at the end
-		fmt.Printf("Client %d: %s\n", id, received)
+        fullMsg := fmt.Sprintf("Client %d: %s", id, string(b[:n]))
+        fmt.Print(fullMsg)
+
+        for _, c := range channels {
+            if c == ch {
+                continue
+            }
+            copy(b, []byte(fullMsg))
+
+            select {
+            case c <- b:
+            default:
+            }
+        }
+
+        select {
+        case received := <-ch:
+            conn.Write(received)
+        default:
+        }
 	}
 }
 
@@ -49,7 +69,9 @@ func main() {
 		if err != nil {
 			log.Fatalln(err)
 		}
+        ch := make(chan []byte, 32)
+        channels[id] = ch
 
-		go handleTCP(id, conn)
+		go handleTCP(id, conn, ch)
 	}
 }
