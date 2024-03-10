@@ -9,15 +9,19 @@ import (
 	"time"
 )
 
+const (
+	serverPort = 9001
+	bufSize    = 4096
+)
+
 var (
-	port        = 9001
 	ip          = net.ParseIP("127.0.0.1")
 	connections = make([]net.Conn, 0, 64)
 	addrPorts   = make(map[netip.AddrPort]uint64)
 )
 
 func handleTCP(id uint64, conn net.Conn) {
-	b := make([]byte, 1024)
+	b := make([]byte, bufSize)
 	defer conn.Close()
 
 	// send client its id
@@ -27,6 +31,7 @@ func handleTCP(id uint64, conn net.Conn) {
 	// get connections AddrPort to later identify clients
 	remoteAddrPort, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
 	addrPorts[remoteAddrPort] = id
+	fmt.Printf("Client %d established connection from %v\n", id, remoteAddrPort)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(time.Second))
@@ -42,7 +47,7 @@ func handleTCP(id uint64, conn net.Conn) {
 		}
 
 		fullMsg := fmt.Sprintf("Client %d: %s", id, string(b[:n]))
-		fmt.Print(fullMsg)
+		log.Print(fullMsg)
 
 		for _, c := range connections {
 			if c != conn && c != nil {
@@ -50,22 +55,26 @@ func handleTCP(id uint64, conn net.Conn) {
 			}
 		}
 	}
+	// remove client from available connections
 	connections[id] = nil
+	delete(addrPorts, remoteAddrPort)
+	log.Printf("Client %d disconnected\n", id)
 }
 
 func handleUDP() {
 	addr := net.UDPAddr{
-		Port: port,
+		Port: serverPort,
 		IP:   ip,
 	}
-	b := make([]byte, 4096)
+	b := make([]byte, bufSize)
 
 	conn, err := net.ListenUDP("udp", &addr)
-	defer conn.Close()
 
 	if err != nil {
-		log.Fatalln(err)
+		log.Printf("Failed to open udp socket: %v\n", err)
+		return
 	}
+	defer conn.Close()
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
@@ -76,8 +85,9 @@ func handleUDP() {
 			senderAddrPort := sender.AddrPort()
 			id := addrPorts[senderAddrPort]
 
-			fullMsg := fmt.Sprintf("Client %d: %s", id, string(b[:n]))
-			fmt.Println(fullMsg)
+			received := string(b[:n])
+			fullMsg := fmt.Sprintf("Client %d: %s", id, received)
+			log.Printf("Client %d via UDP: %s", id, received)
 
 			for receiverAddrPort, _ := range addrPorts {
 				if senderAddrPort != receiverAddrPort {
@@ -91,27 +101,31 @@ func handleUDP() {
 
 func main() {
 	addr := net.TCPAddr{
-		Port: port,
+		Port: serverPort,
 		IP:   ip,
 	}
 
 	listener, err := net.ListenTCP("tcp", &addr)
-	defer listener.Close()
 
 	if err != nil {
-		log.Fatalln(err)
+		log.Printf("Failed to open tcp socket: %v\nExiting...", err)
+		return
 	}
+	defer listener.Close()
+
+	fmt.Printf("Server listening on address %v on port %v\n", ip, serverPort)
 
 	go handleUDP()
 
 	var id uint64
 	for id = 0; ; id++ {
 		conn, err := listener.Accept()
-		if err != nil {
-			log.Fatalln(err)
-		}
-		connections = append(connections, conn)
 
-		go handleTCP(id, conn)
+		if err != nil {
+			log.Printf("Failed to accept tcp connection: %v\n", err)
+		} else {
+			connections = append(connections, conn)
+			go handleTCP(id, conn)
+		}
 	}
 }
