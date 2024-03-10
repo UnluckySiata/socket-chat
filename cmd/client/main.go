@@ -11,11 +11,14 @@ import (
 	"net/netip"
 	"os"
 	"time"
+	"unsafe"
 )
 
 const (
-	serverPort = 9001
-	bufSize    = 4096
+	serverPort    = 9001
+	multicastPort = 9002
+	bufSize       = 4096
+	idLen         = 8
 
 	asciiArt = "\n" +
 		"   .----.\n" +
@@ -27,8 +30,9 @@ const (
 )
 
 var (
-	open = true
-	ip   = net.ParseIP("127.0.0.1")
+	open        = true
+	IP          = net.ParseIP("127.0.0.1")
+	multicastIP = net.ParseIP("224.0.0.91")
 )
 
 func handleIncoming(conn net.Conn) {
@@ -57,12 +61,44 @@ func handleIncoming(conn net.Conn) {
 	}
 }
 
+func handleIncomingMulticast(conn *net.UDPConn, ownAddr *net.UDPAddr, ownID uint64) {
+	b := make([]byte, bufSize)
+
+	var senderID uint64
+
+	for open {
+		conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n, _, err := conn.ReadFromUDP(b)
+
+		if err != nil {
+			// check if already handled closing
+			if !open {
+				return
+			}
+
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			} else {
+				log.Println("\nMulticast connection shut down")
+				break
+			}
+		}
+
+		buffer := bytes.NewReader(b)
+		binary.Read(buffer, binary.NativeEndian, &senderID)
+
+		if n > 0 && ownID != senderID {
+			fmt.Println(string(b[idLen:n]))
+		}
+	}
+}
+
 func main() {
 	localTCP := net.TCPAddr{
-		IP: ip,
+		IP: IP,
 	}
 	serverTCP := net.TCPAddr{
-		IP:   ip,
+		IP:   IP,
 		Port: serverPort,
 	}
 
@@ -79,12 +115,12 @@ func main() {
 	localPort := localAddrPort.Port()
 
 	localUDP := net.UDPAddr{
-		IP:   ip,
+		IP:   IP,
 		Port: int(localPort),
 	}
 
 	serverUDP := net.UDPAddr{
-		IP:   ip,
+		IP:   IP,
 		Port: serverPort,
 	}
 
@@ -96,8 +132,27 @@ func main() {
 	}
 	defer connUDP.Close()
 
+	multicastAddr := net.UDPAddr{
+		IP:   multicastIP,
+		Port: multicastPort,
+	}
+
+	multicastListener, err := net.ListenMulticastUDP("udp", nil, &multicastAddr)
+	if err != nil {
+		log.Printf("Failed to listen to multicast: %v\nExiting..", err)
+		return
+	}
+	defer multicastListener.Close()
+
+	multicastSender, err := net.DialUDP("udp4", nil, &multicastAddr)
+	if err != nil {
+		log.Printf("Failed to reach multicast udp socket: %v\nExiting..", err)
+		return
+	}
+	defer multicastSender.Close()
+
 	// get client id from server
-	b := make([]byte, 64)
+	b := make([]byte, bufSize)
 	connTCP.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, err = connTCP.Read(b)
 
@@ -109,11 +164,12 @@ func main() {
 	buffer := bytes.NewReader(b)
 	var id uint64
 	binary.Read(buffer, binary.NativeEndian, &id)
-	fmt.Printf("Client %d connected on address %v on port %v\n", id, ip, localPort)
+	fmt.Printf("Client %d connected on address %v on port %v\n", id, IP, localPort)
 
 	// asynchronously read incomming messages from connections
 	go handleIncoming(connTCP)
 	go handleIncoming(connUDP)
+	go handleIncomingMulticast(multicastListener, &multicastAddr, id)
 
 	reader := bufio.NewReader(os.Stdin)
 	for open {
@@ -129,6 +185,18 @@ func main() {
 		switch string(read[:len(read)-1]) {
 		case "U":
 			connUDP.Write([]byte(asciiArt))
+		case "M":
+			message := fmt.Sprintf("Client %d (multicast): %s", id, asciiArt)
+
+			idBytes := (*[idLen]byte)(unsafe.Pointer(&id))
+			for i := 0; i < idLen; i++ {
+				b[i] = idBytes[i]
+			}
+			for i := 0; i < len(message); i++ {
+				b[i+idLen] = message[i]
+			}
+
+			multicastSender.Write(b[:idLen+len(message)])
 		default:
 			if len(read) > 1 {
 				connTCP.Write(read)
